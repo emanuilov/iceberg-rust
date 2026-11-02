@@ -150,6 +150,7 @@ impl StorageFactory for OpenDalStorageFactory {
             } => Ok(Arc::new(OpenDalStorage::S3 {
                 config: s3_config_parse(config.props().clone())?.into(),
                 customized_credential_load: customized_credential_load.clone(),
+                retry: S3Retry::from_properties(config.props())?,
             })),
             #[cfg(feature = "opendal-gcs")]
             OpenDalStorageFactory::Gcs => Ok(Arc::new(OpenDalStorage::Gcs {
@@ -210,6 +211,9 @@ pub enum OpenDalStorage {
         /// Custom AWS credential loader.
         #[serde(skip)]
         customized_credential_load: Option<s3::CustomAwsCredentialLoader>,
+        /// The `s3.retry.*` properties.
+        #[serde(default)]
+        retry: S3Retry,
     },
     /// GCS storage variant.
     #[cfg(feature = "opendal-gcs")]
@@ -265,6 +269,8 @@ impl OpenDalStorage {
         path: &'a impl AsRef<str>,
     ) -> Result<(Operator, &'a str)> {
         let path = path.as_ref();
+        // only S3 reads the `s3.retry.*` properties
+        let mut retry_layer = RetryLayer::new();
         let (operator, relative_path): (Operator, &str) = match self {
             #[cfg(feature = "opendal-memory")]
             OpenDalStorage::Memory(op) => {
@@ -287,7 +293,9 @@ impl OpenDalStorage {
             OpenDalStorage::S3 {
                 config,
                 customized_credential_load,
+                retry,
             } => {
+                retry_layer = retry.layer();
                 let op = s3_config_build(config, customized_credential_load, path)?;
                 let op_info = op.info();
 
@@ -365,7 +373,7 @@ impl OpenDalStorage {
         // Transient errors are common for object stores; we retry temporary
         // failures with exponential backoff. The retry behavior also
         // benefits non-object-store backends.
-        let operator = operator.layer(TimeoutLayer::new()).layer(RetryLayer::new());
+        let operator = operator.layer(TimeoutLayer::new()).layer(retry_layer);
         Ok((operator, relative_path))
     }
 
@@ -677,6 +685,7 @@ mod tests {
         let storage = OpenDalStorage::S3 {
             config: Arc::new(S3Config::default()),
             customized_credential_load: None,
+            retry: S3Retry::default(),
         };
 
         // All S3-family schemes are accepted by the same storage instance.
